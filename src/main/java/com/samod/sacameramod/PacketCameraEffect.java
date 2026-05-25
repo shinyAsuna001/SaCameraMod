@@ -94,7 +94,9 @@ public class PacketCameraEffect {
                 CameraController.get().deactivate();
             } else {
                 CameraController.CameraEffect eff = msg.toEffect();
-                if (eff != null) CameraController.get().addEffect(eff);
+                if (eff != null) {
+                    CameraController.get().addEffect(eff);
+                }
             }
         });
         ctx.get().setPacketHandled(true);

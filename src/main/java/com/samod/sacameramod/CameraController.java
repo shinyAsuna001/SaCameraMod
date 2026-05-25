@@ -2,16 +2,21 @@ package com.samod.sacameramod;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ActiveRenderInfo;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.vector.Vector3d;
 import net.minecraftforge.client.event.EntityViewRenderEvent;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 
 public class CameraController {
+    private static final Logger LOGGER = LogManager.getLogger();
     private static final CameraController INSTANCE = new CameraController();
 
     private final List<CameraEffect> effects = new ArrayList<>();
@@ -51,6 +56,7 @@ public class CameraController {
     public void addEffect(CameraEffect effect) {
         this.effects.add(effect);
         this.active = true;
+        LOGGER.info("Added camera effect: {} (totalTicks={})", effect.getClass().getSimpleName(), effect.totalTicks);
     }
 
     public void activate(Vector3d startPos, float startYaw, float startPitch) {
@@ -141,7 +147,7 @@ public class CameraController {
 
         float cinematicYaw = Float.NaN;
         float cinematicPitch = Float.NaN;
-        Vector3d cameraPosition = getViewPosition(info);
+        Vector3d cameraPosition = info.getPosition();
         double worldTargetX = 0;
         double worldTargetY = 0;
         double worldTargetZ = 0;
@@ -262,25 +268,151 @@ public class CameraController {
 
     private static void translateView(ActiveRenderInfo info, double x, double y, double z) {
         try {
-            Field positionField = ActiveRenderInfo.class.getDeclaredField("position");
-            positionField.setAccessible(true);
-            Vector3d position = (Vector3d) positionField.get(info);
-            if (position != null) {
-                positionField.set(info, position.add(x, y, z));
+            Vector3d position = info.getPosition();
+            if (position == null) {
+                return;
+            }
+            Vector3d next = position.add(x, y, z);
+            try {
+                if (setInfoPosition(info, next)) {
+                    return;
+                }
+            } catch (Throwable ignored) {
+                // fallback to field access
+            }
+
+            Field positionField = findFieldByType(ActiveRenderInfo.class, Vector3d.class);
+            if (positionField != null) {
+                positionField.setAccessible(true);
+                positionField.set(info, next);
+                updateCameraBlockPosition(info, next);
             }
         } catch (ReflectiveOperationException e) {
-            // Ignore; if the field is unavailable in this runtime, no camera translation is applied.
+            // Ignore; if the field or method is unavailable in this runtime, no camera translation is applied.
+        }
+    }
+
+    private static boolean setInfoPosition(ActiveRenderInfo info, Vector3d next) throws ReflectiveOperationException {
+        Method setPosition = findSetPositionMethod();
+        if (setPosition != null) {
+            if (setPosition.getParameterCount() == 1) {
+                setPosition.invoke(info, next);
+            } else {
+                setPosition.invoke(info, next.x, next.y, next.z);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static Method findSetPositionMethod() {
+        Method setPosition = getMethod(ActiveRenderInfo.class, "setPosition", Vector3d.class);
+        if (setPosition != null) {
+            return setPosition;
+        }
+        setPosition = getMethod(ActiveRenderInfo.class, "setPosition", double.class, double.class, double.class);
+        if (setPosition != null) {
+            return setPosition;
+        }
+        Class<?> clazz = ActiveRenderInfo.class;
+        while (clazz != null) {
+            for (Method method : clazz.getDeclaredMethods()) {
+                if (method.getReturnType() == void.class) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (parameters.length == 1 && parameters[0] == Vector3d.class) {
+                        method.setAccessible(true);
+                        return method;
+                    }
+                    if (parameters.length == 3 && parameters[0] == double.class && parameters[1] == double.class && parameters[2] == double.class) {
+                        method.setAccessible(true);
+                        return method;
+                    }
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
+    private static Field findFieldByType(Class<?> clazz, Class<?> type) {
+        while (clazz != null) {
+            for (Field field : clazz.getDeclaredFields()) {
+                if (type.isAssignableFrom(field.getType())) {
+                    return field;
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
+    private static void updateCameraBlockPosition(ActiveRenderInfo info, Vector3d next) {
+        try {
+            Field blockPositionField = findFieldByType(ActiveRenderInfo.class, BlockPos.class);
+            if (blockPositionField == null) {
+                return;
+            }
+            blockPositionField.setAccessible(true);
+            Object blockPosition = blockPositionField.get(info);
+            if (blockPosition == null) {
+                return;
+            }
+            Method setMethod = null;
+            for (Method method : blockPosition.getClass().getMethods()) {
+                if (!method.getName().equals("set")) {
+                    continue;
+                }
+                if (method.getParameterCount() == 3) {
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params[0] == double.class && params[1] == double.class && params[2] == double.class) {
+                        setMethod = method;
+                        break;
+                    }
+                    if (params[0] == int.class && params[1] == int.class && params[2] == int.class) {
+                        setMethod = method;
+                        break;
+                    }
+                }
+            }
+            if (setMethod != null) {
+                if (setMethod.getParameterTypes()[0] == double.class) {
+                    setMethod.invoke(blockPosition, next.x, next.y, next.z);
+                } else {
+                    setMethod.invoke(blockPosition, (int)Math.floor(next.x), (int)Math.floor(next.y), (int)Math.floor(next.z));
+                }
+            }
+        } catch (ReflectiveOperationException ignored) {
         }
     }
 
     private static Vector3d getViewPosition(ActiveRenderInfo info) {
         try {
-            Field positionField = ActiveRenderInfo.class.getDeclaredField("position");
-            positionField.setAccessible(true);
-            return (Vector3d) positionField.get(info);
-        } catch (ReflectiveOperationException e) {
+            return info.getPosition();
+        } catch (Throwable t) {
+            try {
+                Field positionField = findFieldByType(ActiveRenderInfo.class, Vector3d.class);
+                if (positionField != null) {
+                    positionField.setAccessible(true);
+                    return (Vector3d) positionField.get(info);
+                }
+            } catch (ReflectiveOperationException e) {
+                // fall through
+            }
             return null;
         }
+    }
+
+    private static Method getMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
+        while (clazz != null) {
+            try {
+                Method method = clazz.getDeclaredMethod(name, paramTypes);
+                method.setAccessible(true);
+                return method;
+            } catch (Throwable ignored) {
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
     }
 
     public boolean hasActiveEffects() {
@@ -361,7 +493,7 @@ public class CameraController {
             this.fadeIn = fadeIn;
             this.hold = hold;
             this.fadeOut = fadeOut;
-            this.totalTicks = fadeIn + hold + fadeOut;
+            this.totalTicks = Math.max(1, fadeIn + hold + fadeOut);
         }
 
         public void tick() {
